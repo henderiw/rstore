@@ -1,0 +1,14 @@
+[package]
+name = "store"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = [
+    "crates/*"
+]
+
+[dependencies]
+tokio = { version = "1.43.0", features = ["full"] }
+storer = { path = "crates/storer" }
+tokio-stream = "0.1.17"

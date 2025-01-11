@@ -1,0 +1,63 @@
+# Rust
+/target/               # Compiled output directory
+**/target/
+**/*.rs.bk             # Backup files
+Cargo.lock             # Cargo lock file (optional, but recommended for libraries)
+
+# Rust-specific tools
+/.idea/
+/*.rs.bk
+*.rs.bk
+
+# If you're using rustup
+/.rustup/
+/.rustup/
+
+# Rust Analyzer (optional, if you use Rust Analyzer)
+/.rust-analyzer/
+
+# WASM
+*.wasm
+
+# Go
+/bin/                  # Binary output
+/pkg/                  # Package object files
+**/*.exe               # Windows binaries
+**/*.out               # Output files
+**/*.test              # Test binaries
+
+# Go Modules
+/go.sum
+/vendor/               # Vendor directory (if you use vendoring)
+
+# Python
+__pycache__/            # Python bytecode files
+**/__pycache__/
+*.py[cod]              # Compiled Python files
+*.egg                  # Python egg files
+*.egg-info/            # Egg info directories
+dist/                  # Distribution build files
+build/                 # Build directory
+*.wheel                # Built wheels
+.venv/                  # Virtual environment
+/.venv
+.Python                # Python interpreter binary
+.env                   # Environment variables (if using dotenv)
+
+# Common tools
+/.vscode/              # VS Code configuration
+/.idea/                # IDE configurations (IntelliJ, PyCharm, etc.)
+.DS_Store              # macOS file metadata
+*.log                  # Log files
+*.tmp                  # Temporary files
+
+# Testing tools
+.pytest_cache/         # pytest cache
+.tox/                  # tox environment
+.coverage              # Coverage reports
+htmlcov/               # Coverage HTML output
+
+# Specific configurations (optional)
+/migrations/           # Database migrations (if applicable)
+*.db                   # SQLite database files
+secrets.json           # Example for sensitive config files
