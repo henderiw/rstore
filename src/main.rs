@@ -110,7 +110,7 @@ async fn main() {
         .expect("Failed to create watcher");
 
     // Spawn a task to handle incoming events
-    tokio::spawn(async move {
+    let event_task = tokio::spawn(async move {
         while let Some(event) = event_stream.next().await {
             match event {
                 WatchEvent::Added(key, value) => {
@@ -140,11 +140,10 @@ async fn main() {
         .await
         .expect("Failed to apply key4");
 
-        memory
+    memory
         .apply("key3".to_string(), "value3.1".to_string())
         .await
         .expect("Failed to apply key3");
-
 
     // Wait for some time to observe events
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -156,7 +155,10 @@ async fn main() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     println!("Watcher stopped. Exiting application.");
 
-    let list_fn =
-        Box::new(|key: String, value: String| println!("Data key {} value {}", key, value));
-    memory.list(list_fn, None).await.unwrap()
+    let list_fn = Box::new(|key: String, value: Arc<String>| {
+        println!("Data key {} value {}", key, *value);
+    });
+    memory.list(list_fn, None).await.unwrap();
+    // Ensure event processing task completes
+    event_task.await.expect("Event task failed");
 }

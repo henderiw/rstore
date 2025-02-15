@@ -1,7 +1,10 @@
-use crate::storer::{GetOptions, ListOptions, Storer};
+use crate::error::{AlreadyExists, NotFoundError};
+use crate::storer::{GetOptions, ListOptions, Storer, StorerValue};
 use crate::watch::WatchEvent;
 use crate::watcher_manager::WatcherManager;
 use async_trait::async_trait;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::cmp::{Eq, Ord};
 use std::collections::HashMap;
 use std::error::Error;
@@ -13,20 +16,20 @@ use tokio::sync::{mpsc, RwLock};
 pub struct Memory<K, T>
 where
     K: Ord + Eq + Hash + Clone + Debug + Send + Sync + 'static,
-    T: Clone + Debug + Send + Sync + 'static,
+    T: Serialize + DeserializeOwned + Debug + Send + Sync + 'static,
 {
-    store: Arc<RwLock<HashMap<K, T>>>,
-    watcher_manager: Arc<WatcherManager<K, T>>,
-    event_sender: mpsc::Sender<WatchEvent<K, T>>,
+    store: Arc<RwLock<HashMap<K, StorerValue<T>>>>,
+    watcher_manager: Arc<WatcherManager<K, Arc<T>>>,
+    event_sender: mpsc::Sender<WatchEvent<K, Arc<T>>>,
 }
 
 impl<K, T> Memory<K, T>
 where
     K: Ord + Eq + Hash + Clone + Debug + Send + Sync + 'static,
-    T: Clone + Debug + Send + Sync + 'static,
+    T: Serialize + DeserializeOwned + Debug + Send + Sync + 'static,
 {
     pub fn new() -> Self {
-        let store: Arc<RwLock<HashMap<K, T>>> = Arc::new(RwLock::new(HashMap::new()));
+        let store: Arc<RwLock<HashMap<K, StorerValue<T>>>> = Arc::new(RwLock::new(HashMap::new()));
         let (watcher_manager, event_sender) = WatcherManager::new(store.clone(), 1024);
         Self {
             store: store,
@@ -34,7 +37,7 @@ where
             event_sender: event_sender,
         }
     }
-    async fn notify_watcher_manager(&self, event: WatchEvent<K, T>) {
+    async fn notify_watcher_manager(&self, event: WatchEvent<K, StorerValue<T>>) {
         if self.watcher_manager.is_running().await {
             _ = self.event_sender.send(event).await;
             return;
@@ -45,21 +48,30 @@ where
 #[async_trait]
 impl<K, T> Storer<K, T> for Memory<K, T>
 where
-    K: Ord + Eq + std::hash::Hash + Clone + Debug + Send + Sync + 'static,
-    T: Clone + Debug + Send + Sync + 'static,
+    K: Ord + Eq + Hash + Clone + Debug + Send + Sync + 'static,
+    T: Serialize + DeserializeOwned + Debug + Send + Sync + 'static,
 {
-    async fn get(&self, key: K, _opts: Option<GetOptions>) -> Result<T, Box<dyn Error>> {
-        let store: tokio::sync::RwLockReadGuard<'_, HashMap<K, T>> = self.store.read().await;
+    async fn get(
+        &self,
+        key: K,
+        _opts: Option<GetOptions>,
+    ) -> Result<StorerValue<T>, Box<dyn Error>> {
+        let store = self.store.read().await;
         store
             .get(&key)
-            .cloned()
-            .ok_or_else(|| "Key not found".into())
+            .cloned() // Clone the value (e.g., Arc)
+            .ok_or_else(|| {
+                Box::new(NotFoundError {
+                    key: format!("{:?}", key),
+                }) as Box<dyn Error>
+            })
     }
+
     async fn list(
         &self,
-        visitor_fn: Box<dyn Fn(K, T) + Send>,
+        visitor_fn: Box<dyn Fn(K, StorerValue<T>) + Send>,
         _opts: Option<ListOptions>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let store = self.store.read().await;
         for (key, value) in store.iter() {
             let key_cloned = key.clone();
@@ -79,47 +91,56 @@ where
         store.len()
     }
 
-    async fn apply(&self, key: K, value: T) -> Result<T, Box<dyn std::error::Error>> {
+    async fn apply(&self, key: K, value: T) -> Result<StorerValue<T>, Box<dyn Error>> {
         let exists = self.get(key.clone(), None).await.is_ok();
         let mut store = self.store.write().await;
-        store.insert(key.clone(), value.clone());
+        let arc_value = Arc::new(value);
+        store.insert(key.clone(), arc_value.clone());
         if !exists {
-            self.notify_watcher_manager(WatchEvent::Added(key.clone(), value.clone()))
+            self.notify_watcher_manager(WatchEvent::Added(key.clone(), arc_value.clone()))
                 .await;
         } else {
-            self.notify_watcher_manager(WatchEvent::Modified(key.clone(), value.clone()))
+            self.notify_watcher_manager(WatchEvent::Modified(key.clone(), arc_value.clone()))
                 .await;
         }
-        Ok(value)
+        Ok(arc_value)
     }
 
-    async fn create(&self, key: K, value: T) -> Result<T, Box<dyn std::error::Error>> {
+    async fn create(&self, key: K, value: T) -> Result<StorerValue<T>, Box<dyn Error>> {
         let mut store = self.store.write().await;
         if store.contains_key(&key) {
-            return Err("Key already exists".into());
+            return Err(Box::new(AlreadyExists {
+                key: format!("{:?}", key),
+            }) as Box<dyn Error>);
         }
-        store.insert(key.clone(), value.clone());
-        self.notify_watcher_manager(WatchEvent::Added(key.clone(), value.clone()))
+        let arc_value = Arc::new(value);
+        store.insert(key.clone(), arc_value.clone());
+        self.notify_watcher_manager(WatchEvent::Added(key.clone(), arc_value.clone()))
             .await;
-        Ok(value)
+        Ok(arc_value)
     }
 
-    async fn update(&self, key: K, value: T) -> Result<T, Box<dyn std::error::Error>> {
+    async fn update(&self, key: K, value: T) -> Result<StorerValue<T>, Box<dyn Error>> {
         let mut store = self.store.write().await;
         if !store.contains_key(&key) {
-            return Err("Key not found".into());
+            return Err(Box::new(NotFoundError {
+                key: format!("{:?}", key),
+            }) as Box<dyn Error>);
         }
-        store.insert(key.clone(), value.clone());
-        self.notify_watcher_manager(WatchEvent::Modified(key.clone(), value.clone()))
+        let arc_value = Arc::new(value);
+        store.insert(key.clone(), arc_value.clone());
+        self.notify_watcher_manager(WatchEvent::Modified(key.clone(), arc_value.clone()))
             .await;
-        Ok(value)
+        Ok(arc_value)
     }
 
-    async fn delete(&self, key: K) -> Result<(), Box<dyn std::error::Error>> {
+    async fn delete(&self, key: K) -> Result<(), Box<dyn Error>> {
         let mut store = self.store.write().await;
-        let value = store
-            .remove(&key)
-            .ok_or_else(|| Box::<dyn Error>::from("Key not found"))?;
+        let value = store.remove(&key).ok_or_else(|| {
+            Box::new(NotFoundError {
+                key: format!("{:?}", key),
+            }) as Box<dyn Error>
+        })?;
         self.notify_watcher_manager(WatchEvent::Deleted(key.clone(), value.clone()))
             .await;
         Ok(())
@@ -132,7 +153,7 @@ where
     ) -> Result<
         (
             tokio::sync::oneshot::Sender<()>,
-            tokio_stream::wrappers::ReceiverStream<WatchEvent<K, T>>,
+            tokio_stream::wrappers::ReceiverStream<WatchEvent<K, StorerValue<T>>>,
         ),
         Box<dyn Error>,
     > {
@@ -167,7 +188,7 @@ mod tests {
             .get("key1".to_string(), None)
             .await
             .expect("Failed to get key1");
-        assert_eq!(value, "value1");
+        assert_eq!(*value, "value1".to_string());
     }
 
     #[tokio::test]
@@ -208,7 +229,7 @@ mod tests {
             .get("key1".to_string(), None)
             .await
             .expect("Failed to get key1");
-        assert_eq!(value, "new_value1");
+        assert_eq!(*value, "new_value1".to_string());
     }
 
     #[tokio::test]
@@ -291,7 +312,7 @@ mod tests {
                     let results_clone = results_clone.clone();
                     tokio::spawn(async move {
                         let mut results = results_clone.lock().await; // Use async lock
-                        results.push((key, value));
+                        results.push((key, (*value).clone()));
                     });
                 }),
                 None,

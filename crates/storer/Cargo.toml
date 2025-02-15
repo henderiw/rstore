@@ -3,9 +3,14 @@ name = "storer"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "storer"
+path = "src/lib.rs"
+
 [dependencies]
-tokio = {version = "1.42.0", features=["full"]}
+tokio = { version = "1.43.0", features = ["full"] }
 async-trait = "0.1"
 tokio-stream = {version = "0.1.17", features=["full"]}
 uuid = {version = "1.11.1", features=["v4"]}
 futures = "0.3.31"
+serde = { version = "1.0.217", features = ["derive"] }

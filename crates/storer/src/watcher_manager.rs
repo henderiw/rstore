@@ -63,7 +63,7 @@ where
         // Create the watcher channels
         let (stop_tx, stop_rx) = oneshot::channel();
         let (watch_tx, watch_rx) = tokio::sync::mpsc::channel(100);
-        let  broadcast_stream = BroadcastStream::new(self.broadcast_channel.subscribe());
+        let broadcast_stream = BroadcastStream::new(self.broadcast_channel.subscribe());
 
         // Initialize shared state for backlog and catch-up flag
         let backlog = Arc::new(Mutex::new(Vec::new()));
