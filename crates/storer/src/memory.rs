@@ -149,7 +149,7 @@ where
     async fn watch(
         &self,
         _ctx: tokio::sync::oneshot::Receiver<()>,
-        opts: Option<ListOptions>,
+        options: Option<ListOptions>,
     ) -> Result<
         (
             tokio::sync::oneshot::Sender<()>,
@@ -164,7 +164,7 @@ where
 
         // Add watcher to the manager
         let manager = self.watcher_manager.clone();
-        manager.add_watcher(opts).await
+        manager.add_watcher(options).await
     }
 }
 
