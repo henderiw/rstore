@@ -1,7 +1,7 @@
 use std::sync::Arc;
-use storer::memory::Memory;
-use storer::storer::Storer; // Import the Storer trait
 use storer::watch::WatchEvent;
+use storer::Memory;
+use storer::Storer; // Import the Storer trait
 use tokio_stream::StreamExt;
 
 /*
@@ -155,8 +155,8 @@ async fn main() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     println!("Watcher stopped. Exiting application.");
 
-    let list_fn = Box::new(|key: String, value: Arc<String>| {
-        println!("Data key {} value {}", key, *value);
+    let list_fn = Box::new(|key: String, value: String| {
+        println!("Data key {} value {}", key, value);
     });
     memory.list(list_fn, None).await.unwrap();
     // Ensure event processing task completes

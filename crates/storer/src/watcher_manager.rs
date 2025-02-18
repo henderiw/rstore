@@ -1,44 +1,45 @@
-use crate::storer::ListOptions;
+use crate::storer::{ListOptions, Storer};
 use crate::watch::WatchEvent;
 use std::cmp::{Eq, Ord};
-use std::collections::HashMap;
 use std::error::Error;
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio::task;
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 use tokio_stream::StreamExt;
+use tracing;
 
 pub struct WatcherManager<K, T> {
-    store: Arc<RwLock<HashMap<K, T>>>,
+    store: Arc<dyn Storer<K, T>>,
     broadcast_channel: broadcast::Sender<WatchEvent<K, T>>,
     event_channel: Arc<Mutex<mpsc::Receiver<WatchEvent<K, T>>>>,
     max_watchers: usize,
     running: Arc<Mutex<bool>>,
+    event_channel_tx: mpsc::Sender<WatchEvent<K, T>>,
 }
 
 impl<K, T> WatcherManager<K, T>
 where
-    K: Ord + Eq + Hash + Clone + Send + Sync + 'static,
+    K: Ord + Eq + Hash + Clone + Debug + Send + Sync + 'static,
     T: Clone + Send + Sync + 'static,
 {
-    pub fn new(
-        store: Arc<RwLock<HashMap<K, T>>>,
-        max_watchers: usize,
-    ) -> (Self, mpsc::Sender<WatchEvent<K, T>>) {
+    pub fn new(store: Arc<dyn Storer<K, T>>, max_watchers: usize) -> Self {
         let (broadcast_channel_tx, _) = broadcast::channel(100);
         let (event_channel_tx, event_channel_rx) = mpsc::channel(100);
-        (
-            Self {
-                store: store,
-                broadcast_channel: broadcast_channel_tx,
-                event_channel: Arc::new(Mutex::new(event_channel_rx)),
-                max_watchers: max_watchers,
-                running: Arc::new(Mutex::new(false)),
-            },
+        Self {
+            store: store,
+            broadcast_channel: broadcast_channel_tx,
+            event_channel: Arc::new(Mutex::new(event_channel_rx)),
+            max_watchers: max_watchers,
+            running: Arc::new(Mutex::new(false)),
             event_channel_tx,
-        )
+        }
+    }
+
+    pub fn event_channel_tx(&self) -> &mpsc::Sender<WatchEvent<K, T>> {
+        &self.event_channel_tx
     }
 
     pub async fn is_running(&self) -> bool {
@@ -102,20 +103,24 @@ where
         catchup_done: Arc<Mutex<bool>>,
     ) {
         let store = self.store.clone();
+        let watch_tx_clone = watch_tx.clone();
+        //let backlog_clone = backlog.clone();
+        //let catchup_done_clone = catchup_done.clone();
         tokio::spawn(async move {
-            let store_lock = store.read().await;
-            let mut keys: Vec<_> = store_lock.keys().cloned().collect();
-            keys.sort();
-
-            for key in keys {
-                if let Some(value) = store_lock.get(&key) {
-                    let event = WatchEvent::Added(key.clone(), value.clone());
-                    if watch_tx.send(event).await.is_err() {
-                        return; // Consumer dropped
-                    }
+            let visitor_fn: Box<dyn Fn(K, T) + Send> = Box::new(move |key, value| {
+                let event = WatchEvent::Added(key.clone(), value.clone()); // Clone Arc<T> instead of Arc<Arc<T>>
+                if watch_tx_clone.try_send(event).is_err() {
+                    tracing::warn!("Watcher dropped event due to full queue.");
                 }
+            });
+
+            // Step 1: Use store.list() to stream results instead of calling get() per key
+            if let Err(e) = store.list(visitor_fn, None).await {
+                tracing::error!("Error listing resources: {:?}", e);
+                return; // Stop if listing fails
             }
 
+            // Step 2: Send backlog events
             let mut backlog_lock = backlog.lock().await;
             for event in backlog_lock.drain(..) {
                 if watch_tx.send(event).await.is_err() {
@@ -123,6 +128,7 @@ where
                 }
             }
 
+            // Step 3: Mark catch-up as complete
             let mut catchup_done_lock = catchup_done.lock().await;
             *catchup_done_lock = true;
         });

@@ -1,46 +1,56 @@
 use crate::error::{AlreadyExists, NotFoundError};
-use crate::storer::{GetOptions, ListOptions, Storer, StorerValue};
+use crate::storer::{GetOptions, ListOptions, Storer};
 use crate::watch::WatchEvent;
 use crate::watcher_manager::WatcherManager;
 use async_trait::async_trait;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use std::cmp::{Eq, Ord};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 
 pub struct Memory<K, T>
 where
     K: Ord + Eq + Hash + Clone + Debug + Send + Sync + 'static,
-    T: Serialize + DeserializeOwned + Debug + Send + Sync + 'static,
+    T: Clone + Send + Sync + 'static,
 {
-    store: Arc<RwLock<HashMap<K, StorerValue<T>>>>,
-    watcher_manager: Arc<WatcherManager<K, Arc<T>>>,
-    event_sender: mpsc::Sender<WatchEvent<K, Arc<T>>>,
+    store: Arc<RwLock<HashMap<K, T>>>,
+    watcher_manager: Option<Arc<WatcherManager<K, T>>>,
 }
 
 impl<K, T> Memory<K, T>
 where
     K: Ord + Eq + Hash + Clone + Debug + Send + Sync + 'static,
-    T: Serialize + DeserializeOwned + Debug + Send + Sync + 'static,
+    T: Clone + Send + Sync + 'static,
 {
     pub fn new() -> Self {
-        let store: Arc<RwLock<HashMap<K, StorerValue<T>>>> = Arc::new(RwLock::new(HashMap::new()));
-        let (watcher_manager, event_sender) = WatcherManager::new(store.clone(), 1024);
+        // Step 1: Create store
+        let store = Arc::new(RwLock::new(HashMap::new()));
+
+        // Step 2: Create a storer without WatcherManager to please the watcher manager
+        let storer: Arc<dyn Storer<K, T>> = Arc::new(Self {
+            store: Arc::clone(&store),
+            watcher_manager: None,
+        });
+
+        let watcher_manager = Arc::new(WatcherManager::new(Arc::clone(&storer), 1024));
+
+        // Step 4: Rebuild `storer` with `watcher_manager`
         Self {
-            store: store,
-            watcher_manager: Arc::new(watcher_manager),
-            event_sender: event_sender,
+            store,
+            watcher_manager: Some(watcher_manager),
         }
     }
-    async fn notify_watcher_manager(&self, event: WatchEvent<K, StorerValue<T>>) {
-        if self.watcher_manager.is_running().await {
-            _ = self.event_sender.send(event).await;
-            return;
+
+    async fn notify_watcher_manager(&self, event: WatchEvent<K, T>) {
+        if let Some(watcher_manager) = &self.watcher_manager {
+            if watcher_manager.is_running().await {
+                if let Err(e) = watcher_manager.event_channel_tx().send(event).await {
+                    tracing::warn!("Failed to send event to watcher manager: {:?}", e);
+                }
+            }
         }
     }
 }
@@ -49,13 +59,9 @@ where
 impl<K, T> Storer<K, T> for Memory<K, T>
 where
     K: Ord + Eq + Hash + Clone + Debug + Send + Sync + 'static,
-    T: Serialize + DeserializeOwned + Debug + Send + Sync + 'static,
+    T: Clone + Send + Sync + 'static,
 {
-    async fn get(
-        &self,
-        key: K,
-        _opts: Option<GetOptions>,
-    ) -> Result<StorerValue<T>, Box<dyn Error>> {
+    async fn get(&self, key: K, _opts: Option<GetOptions>) -> Result<T, Box<dyn Error>> {
         let store = self.store.read().await;
         store
             .get(&key)
@@ -69,14 +75,12 @@ where
 
     async fn list(
         &self,
-        visitor_fn: Box<dyn Fn(K, StorerValue<T>) + Send>,
+        visitor_fn: Box<dyn Fn(K, T) + Send>,
         _opts: Option<ListOptions>,
     ) -> Result<(), Box<dyn Error>> {
         let store = self.store.read().await;
         for (key, value) in store.iter() {
-            let key_cloned = key.clone();
-            let value_cloned = value.clone();
-            visitor_fn(key_cloned, value_cloned);
+            visitor_fn(key.clone(), value.clone());
         }
         Ok(())
     }
@@ -91,47 +95,44 @@ where
         store.len()
     }
 
-    async fn apply(&self, key: K, value: T) -> Result<StorerValue<T>, Box<dyn Error>> {
+    async fn apply(&self, key: K, value: T) -> Result<T, Box<dyn Error>> {
         let exists = self.get(key.clone(), None).await.is_ok();
         let mut store = self.store.write().await;
-        let arc_value = Arc::new(value);
-        store.insert(key.clone(), arc_value.clone());
+        store.insert(key.clone(), value.clone());
         if !exists {
-            self.notify_watcher_manager(WatchEvent::Added(key.clone(), arc_value.clone()))
+            self.notify_watcher_manager(WatchEvent::Added(key.clone(), value.clone()))
                 .await;
         } else {
-            self.notify_watcher_manager(WatchEvent::Modified(key.clone(), arc_value.clone()))
+            self.notify_watcher_manager(WatchEvent::Modified(key.clone(), value.clone()))
                 .await;
         }
-        Ok(arc_value)
+        Ok(value)
     }
 
-    async fn create(&self, key: K, value: T) -> Result<StorerValue<T>, Box<dyn Error>> {
+    async fn create(&self, key: K, value: T) -> Result<T, Box<dyn Error>> {
         let mut store = self.store.write().await;
         if store.contains_key(&key) {
             return Err(Box::new(AlreadyExists {
                 key: format!("{:?}", key),
             }) as Box<dyn Error>);
         }
-        let arc_value = Arc::new(value);
-        store.insert(key.clone(), arc_value.clone());
-        self.notify_watcher_manager(WatchEvent::Added(key.clone(), arc_value.clone()))
+        store.insert(key.clone(), value.clone());
+        self.notify_watcher_manager(WatchEvent::Added(key.clone(), value.clone()))
             .await;
-        Ok(arc_value)
+        Ok(value)
     }
 
-    async fn update(&self, key: K, value: T) -> Result<StorerValue<T>, Box<dyn Error>> {
+    async fn update(&self, key: K, value: T) -> Result<T, Box<dyn Error>> {
         let mut store = self.store.write().await;
         if !store.contains_key(&key) {
             return Err(Box::new(NotFoundError {
                 key: format!("{:?}", key),
             }) as Box<dyn Error>);
         }
-        let arc_value = Arc::new(value);
-        store.insert(key.clone(), arc_value.clone());
-        self.notify_watcher_manager(WatchEvent::Modified(key.clone(), arc_value.clone()))
+        store.insert(key.clone(), value.clone());
+        self.notify_watcher_manager(WatchEvent::Modified(key.clone(), value.clone()))
             .await;
-        Ok(arc_value)
+        Ok(value)
     }
 
     async fn delete(&self, key: K) -> Result<(), Box<dyn Error>> {
@@ -153,18 +154,21 @@ where
     ) -> Result<
         (
             tokio::sync::oneshot::Sender<()>,
-            tokio_stream::wrappers::ReceiverStream<WatchEvent<K, StorerValue<T>>>,
+            tokio_stream::wrappers::ReceiverStream<WatchEvent<K, T>>,
         ),
         Box<dyn Error>,
     > {
-        //unimplemented!("Watch functionality is not implemented yet.")
-        //let catchup = opts.map_or(true, |o| !o.watch);
-
-        //let filter_fn = move |_value: &T| true; // Customize filtering logic if needed
-
         // Add watcher to the manager
-        let manager = self.watcher_manager.clone();
-        manager.add_watcher(options).await
+        match &self.watcher_manager {
+            None => Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "WatcherManager is not initialized",
+            ))),
+            Some(watcher_manager) => {
+                let manager = watcher_manager.clone();
+                manager.add_watcher(options).await
+            }
+        }
     }
 }
 
@@ -278,10 +282,13 @@ mod tests {
             .await
             .expect("Failed to create key2");
 
+
         // List keys
         let keys = memory.list_keys(None).await;
-        let expected_keys = vec!["\"key1\"", "\"key2\""]; // Keys are formatted as strings
-        assert_eq!(keys, expected_keys);
+
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"\"key1\"".to_string()));
+        assert!(keys.contains(&"\"key2\"".to_string()));
     }
 
     use std::sync::Arc;
@@ -312,7 +319,7 @@ mod tests {
                     let results_clone = results_clone.clone();
                     tokio::spawn(async move {
                         let mut results = results_clone.lock().await; // Use async lock
-                        results.push((key, (*value).clone()));
+                        results.push((key, value.clone()));
                     });
                 }),
                 None,
