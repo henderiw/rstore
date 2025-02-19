@@ -18,3 +18,4 @@ serde_json = "1.0.138"
 rayon = "1.10.0"
 sqlx = { version = "0.8.3", features = ["sqlite", "time", "runtime-tokio"] }
 tracing = "0.1.41"
+core_apim = { path = "/Users/henderiw/code/kform/kform-dev/choreo-rust/crates/apimachinery/core"}

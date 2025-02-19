@@ -50,7 +50,8 @@ where
     pub async fn add_watcher(
         self: Arc<Self>,
         opts: Option<ListOptions>,
-    ) -> Result<(oneshot::Sender<()>, ReceiverStream<WatchEvent<K, T>>), Box<dyn Error + Send + Sync>> {
+    ) -> Result<(oneshot::Sender<()>, ReceiverStream<WatchEvent<K, T>>), Box<dyn Error + Send + Sync>>
+    {
         if self.broadcast_channel.receiver_count() >= self.max_watchers {
             return Err("Max watchers reached".to_string().into());
         }

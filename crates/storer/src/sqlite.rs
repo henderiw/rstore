@@ -1,7 +1,9 @@
+use crate::error::DBError;
 use crate::storer::{GetOptions, ListOptions, Storer};
 use crate::watch::WatchEvent;
 use crate::watcher_manager::WatcherManager;
 use async_trait::async_trait;
+use core_apim::APIError;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json;
 use sqlx::sqlite::SqlitePool;
@@ -72,13 +74,20 @@ where
     K: ToString + From<String> + Eq + std::hash::Hash + Clone + Debug + Send + Sync + Ord + 'static,
     T: Serialize + DeserializeOwned + Clone + Debug + Send + Sync + 'static,
 {
-    async fn get(&self, key: K, _opts: Option<GetOptions>) -> Result<T, Box<dyn Error + Send + Sync>> {
+    async fn get(
+        &self,
+        key: K,
+        _opts: Option<GetOptions>,
+    ) -> Result<T, Box<dyn Error + Send + Sync>> {
         let row: (String,) = sqlx::query_as("SELECT value FROM store WHERE key = ?")
             .bind(key.to_string())
             .fetch_one(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| APIError::from(DBError(e)))?;
 
-        let deserialized_value: T = serde_json::from_str(&row.0)?;
+        let deserialized_value: T = serde_json::from_str(&row.0).map_err(|_| {
+            APIError::InternalServerError("Failed to deserialize value".to_string())
+        })?;
         Ok(deserialized_value)
     }
 
@@ -89,7 +98,8 @@ where
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let rows = sqlx::query_as::<_, (String, String)>("SELECT key, value FROM store")
             .fetch_all(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| APIError::from(DBError(e)))?;
 
         for (key, value) in rows {
             let deserialized_value: T = serde_json::from_str(&value)?;
@@ -127,7 +137,8 @@ where
         .bind(key.to_string())
         .bind(serialized_value)
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| APIError::from(DBError(e)))?;
 
         if result.rows_affected() == 1 {
             self.notify_watcher_manager(WatchEvent::Added(key.clone(), value.clone()))
@@ -147,7 +158,8 @@ where
             .bind(key.to_string())
             .bind(serialized_value)
             .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| APIError::from(DBError(e)))?;
 
         self.notify_watcher_manager(WatchEvent::Added(key.clone(), value.clone()))
             .await;
@@ -158,12 +170,13 @@ where
         let serialized_value = serde_json::to_string(&value)?;
 
         self.get(key.clone(), None).await?;
-            
+
         sqlx::query("UPDATE store SET value = ? WHERE key = ?;")
             .bind(serialized_value)
             .bind(key.to_string())
             .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| APIError::from(DBError(e)))?;
 
         self.notify_watcher_manager(WatchEvent::Modified(key.clone(), value.clone()))
             .await;
@@ -173,14 +186,15 @@ where
     async fn delete(&self, key: K) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Fetch the value before deletion
         let value = match self.get(key.clone(), None).await {
-            Ok(v) => v, // Key exists, proceed with deletion
+            Ok(v) => v,              // Key exists, proceed with deletion
             Err(_) => return Ok(()), // Key not found, return `Ok(())` silently
         };
 
         sqlx::query("DELETE FROM store WHERE key = ?;")
             .bind(key.to_string())
             .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| APIError::from(DBError(e)))?;
 
         // Step 3: Notify the watcher manager
         self.notify_watcher_manager(WatchEvent::Deleted(key.clone(), value))
@@ -201,9 +215,8 @@ where
     > {
         // Add watcher to the manager
         match &self.watcher_manager {
-            None => Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "WatcherManager is not initialized",
+            None => Err(Box::new(APIError::InternalServerError(
+                "WatcherManager is not initialized".to_string(),
             ))),
             Some(watcher_manager) => {
                 let manager = watcher_manager.clone();

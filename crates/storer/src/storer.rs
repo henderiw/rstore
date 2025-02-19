@@ -28,7 +28,11 @@ where
     K: Eq + std::hash::Hash + Clone + Debug + Send + Sync + 'static,
     T: Send + Sync + 'static,
 {
-    async fn get(&self, key: K, opts: Option<GetOptions>) -> Result<T, Box<dyn Error + Send + Sync>>;
+    async fn get(
+        &self,
+        key: K,
+        opts: Option<GetOptions>,
+    ) -> Result<T, Box<dyn Error + Send + Sync>>;
     async fn list(
         &self,
         visitor_fn: Box<dyn Fn(K, T) + Send>,
@@ -38,8 +42,8 @@ where
     async fn len(&self, opts: Option<ListOptions>) -> usize;
     async fn apply(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>>;
     async fn create(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>>;
-    async fn update(&self, key: K, value: T) -> Result<T, Box<dyn Error+ Send + Sync >>;
-    async fn delete(&self, key: K) -> Result<(), Box<dyn Error+ Send + Sync>>;
+    async fn update(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>>;
+    async fn delete(&self, key: K) -> Result<(), Box<dyn Error + Send + Sync>>;
     async fn watch(
         &self,
         ctx: oneshot::Receiver<()>,
@@ -54,7 +58,11 @@ where
     K: Eq + std::hash::Hash + Clone + Debug + Send + Sync + 'static,
     T: Serialize + DeserializeOwned + Debug + Send + Sync + 'static,
 {
-    async fn get(&self, key: K, opts: Option<GetOptions>) -> Result<T, Box<dyn Error + Send + Sync>> {
+    async fn get(
+        &self,
+        key: K,
+        opts: Option<GetOptions>,
+    ) -> Result<T, Box<dyn Error + Send + Sync>> {
         self.deref().get(key, opts).await
     }
 
@@ -94,7 +102,8 @@ where
         &self,
         ctx: oneshot::Receiver<()>,
         opts: Option<ListOptions>,
-    ) -> Result<(oneshot::Sender<()>, ReceiverStream<WatchEvent<K, T>>), Box<dyn Error + Send + Sync>> {
+    ) -> Result<(oneshot::Sender<()>, ReceiverStream<WatchEvent<K, T>>), Box<dyn Error + Send + Sync>>
+    {
         self.deref().watch(ctx, opts).await
     }
 }

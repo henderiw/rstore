@@ -1,8 +1,9 @@
-use crate::error::{AlreadyExists, NotFoundError};
+//use crate::error::{AlreadyExists, NotFoundError};
 use crate::storer::{GetOptions, ListOptions, Storer};
 use crate::watch::WatchEvent;
 use crate::watcher_manager::WatcherManager;
 use async_trait::async_trait;
+use core_apim::APIError;
 use std::cmp::{Eq, Ord};
 use std::collections::HashMap;
 use std::error::Error;
@@ -61,15 +62,18 @@ where
     K: Ord + Eq + Hash + Clone + Debug + Send + Sync + 'static,
     T: Clone + Send + Sync + 'static,
 {
-    async fn get(&self, key: K, _opts: Option<GetOptions>) -> Result<T, Box<dyn Error + Send + Sync>> {
+    async fn get(
+        &self,
+        key: K,
+        _opts: Option<GetOptions>,
+    ) -> Result<T, Box<dyn Error + Send + Sync>> {
         let store = self.store.read().await;
         store
             .get(&key)
             .cloned() // Clone the value (e.g., Arc)
             .ok_or_else(|| {
-                Box::new(NotFoundError {
-                    key: format!("{:?}", key),
-                }) as Box<dyn Error + Send + Sync>
+                Box::new(APIError::NotFound(format!("key: {:?}", key)))
+                    as Box<dyn Error + Send + Sync>
             })
     }
 
@@ -112,9 +116,8 @@ where
     async fn create(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>> {
         let mut store = self.store.write().await;
         if store.contains_key(&key) {
-            return Err(Box::new(AlreadyExists {
-                key: format!("{:?}", key),
-            }) as Box<dyn Error + Send + Sync>);
+            return Err(Box::new(APIError::AlreadyExists(format!("key: {:?}", key)))
+                as Box<dyn Error + Send + Sync>);
         }
         store.insert(key.clone(), value.clone());
         self.notify_watcher_manager(WatchEvent::Added(key.clone(), value.clone()))
@@ -125,9 +128,8 @@ where
     async fn update(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>> {
         let mut store = self.store.write().await;
         if !store.contains_key(&key) {
-            return Err(Box::new(NotFoundError {
-                key: format!("{:?}", key),
-            }) as Box<dyn Error + Send + Sync>);
+            return Err(Box::new(APIError::NotFound(format!("key: {:?}", key)))
+                as Box<dyn Error + Send + Sync>);
         }
         store.insert(key.clone(), value.clone());
         self.notify_watcher_manager(WatchEvent::Modified(key.clone(), value.clone()))
@@ -138,9 +140,7 @@ where
     async fn delete(&self, key: K) -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut store = self.store.write().await;
         let value = store.remove(&key).ok_or_else(|| {
-            Box::new(NotFoundError {
-                key: format!("{:?}", key),
-            }) as Box<dyn Error + Send + Sync>
+            Box::new(APIError::NotFound(format!("key: {:?}", key))) as Box<dyn Error + Send + Sync>
         })?;
         self.notify_watcher_manager(WatchEvent::Deleted(key.clone(), value.clone()))
             .await;
@@ -160,9 +160,8 @@ where
     > {
         // Add watcher to the manager
         match &self.watcher_manager {
-            None => Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "WatcherManager is not initialized",
+            None => Err(Box::new(APIError::InternalServerError(
+                "WatcherManager is not initialized".to_string(),
             ))),
             Some(watcher_manager) => {
                 let manager = watcher_manager.clone();
@@ -281,7 +280,6 @@ mod tests {
             .create("key2".to_string(), "value2".to_string())
             .await
             .expect("Failed to create key2");
-
 
         // List keys
         let keys = memory.list_keys(None).await;
