@@ -6,4 +6,5 @@ pub use sqlite::SqliteStorer;
 pub mod storer;
 pub use storer::Storer;
 pub mod watch;
+pub use watch::WatchEvent;
 mod watcher_manager;

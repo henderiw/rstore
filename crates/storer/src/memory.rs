@@ -61,7 +61,7 @@ where
     K: Ord + Eq + Hash + Clone + Debug + Send + Sync + 'static,
     T: Clone + Send + Sync + 'static,
 {
-    async fn get(&self, key: K, _opts: Option<GetOptions>) -> Result<T, Box<dyn Error>> {
+    async fn get(&self, key: K, _opts: Option<GetOptions>) -> Result<T, Box<dyn Error + Send + Sync>> {
         let store = self.store.read().await;
         store
             .get(&key)
@@ -69,7 +69,7 @@ where
             .ok_or_else(|| {
                 Box::new(NotFoundError {
                     key: format!("{:?}", key),
-                }) as Box<dyn Error>
+                }) as Box<dyn Error + Send + Sync>
             })
     }
 
@@ -77,7 +77,7 @@ where
         &self,
         visitor_fn: Box<dyn Fn(K, T) + Send>,
         _opts: Option<ListOptions>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let store = self.store.read().await;
         for (key, value) in store.iter() {
             visitor_fn(key.clone(), value.clone());
@@ -95,7 +95,7 @@ where
         store.len()
     }
 
-    async fn apply(&self, key: K, value: T) -> Result<T, Box<dyn Error>> {
+    async fn apply(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>> {
         let exists = self.get(key.clone(), None).await.is_ok();
         let mut store = self.store.write().await;
         store.insert(key.clone(), value.clone());
@@ -109,12 +109,12 @@ where
         Ok(value)
     }
 
-    async fn create(&self, key: K, value: T) -> Result<T, Box<dyn Error>> {
+    async fn create(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>> {
         let mut store = self.store.write().await;
         if store.contains_key(&key) {
             return Err(Box::new(AlreadyExists {
                 key: format!("{:?}", key),
-            }) as Box<dyn Error>);
+            }) as Box<dyn Error + Send + Sync>);
         }
         store.insert(key.clone(), value.clone());
         self.notify_watcher_manager(WatchEvent::Added(key.clone(), value.clone()))
@@ -122,12 +122,12 @@ where
         Ok(value)
     }
 
-    async fn update(&self, key: K, value: T) -> Result<T, Box<dyn Error>> {
+    async fn update(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>> {
         let mut store = self.store.write().await;
         if !store.contains_key(&key) {
             return Err(Box::new(NotFoundError {
                 key: format!("{:?}", key),
-            }) as Box<dyn Error>);
+            }) as Box<dyn Error + Send + Sync>);
         }
         store.insert(key.clone(), value.clone());
         self.notify_watcher_manager(WatchEvent::Modified(key.clone(), value.clone()))
@@ -135,12 +135,12 @@ where
         Ok(value)
     }
 
-    async fn delete(&self, key: K) -> Result<(), Box<dyn Error>> {
+    async fn delete(&self, key: K) -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut store = self.store.write().await;
         let value = store.remove(&key).ok_or_else(|| {
             Box::new(NotFoundError {
                 key: format!("{:?}", key),
-            }) as Box<dyn Error>
+            }) as Box<dyn Error + Send + Sync>
         })?;
         self.notify_watcher_manager(WatchEvent::Deleted(key.clone(), value.clone()))
             .await;
@@ -156,7 +156,7 @@ where
             tokio::sync::oneshot::Sender<()>,
             tokio_stream::wrappers::ReceiverStream<WatchEvent<K, T>>,
         ),
-        Box<dyn Error>,
+        Box<dyn Error + Send + Sync>,
     > {
         // Add watcher to the manager
         match &self.watcher_manager {

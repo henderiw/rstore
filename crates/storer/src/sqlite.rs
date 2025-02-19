@@ -72,7 +72,7 @@ where
     K: ToString + From<String> + Eq + std::hash::Hash + Clone + Debug + Send + Sync + Ord + 'static,
     T: Serialize + DeserializeOwned + Clone + Debug + Send + Sync + 'static,
 {
-    async fn get(&self, key: K, _opts: Option<GetOptions>) -> Result<T, Box<dyn Error>> {
+    async fn get(&self, key: K, _opts: Option<GetOptions>) -> Result<T, Box<dyn Error + Send + Sync>> {
         let row: (String,) = sqlx::query_as("SELECT value FROM store WHERE key = ?")
             .bind(key.to_string())
             .fetch_one(&self.pool)
@@ -86,7 +86,7 @@ where
         &self,
         visitor_fn: Box<dyn Fn(K, T) + Send>,
         _opts: Option<ListOptions>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let rows = sqlx::query_as::<_, (String, String)>("SELECT key, value FROM store")
             .fetch_all(&self.pool)
             .await?;
@@ -117,7 +117,7 @@ where
         row.0 as usize
     }
 
-    async fn apply(&self, key: K, value: T) -> Result<T, Box<dyn Error>> {
+    async fn apply(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>> {
         let serialized_value = serde_json::to_string(&value)?;
 
         let result = sqlx::query(
@@ -140,7 +140,7 @@ where
         Ok(value)
     }
 
-    async fn create(&self, key: K, value: T) -> Result<T, Box<dyn Error>> {
+    async fn create(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>> {
         let serialized_value = serde_json::to_string(&value)?;
 
         sqlx::query("INSERT INTO store (key, value) VALUES (?, ?);")
@@ -154,7 +154,7 @@ where
         Ok(value)
     }
 
-    async fn update(&self, key: K, value: T) -> Result<T, Box<dyn Error>> {
+    async fn update(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>> {
         let serialized_value = serde_json::to_string(&value)?;
 
         self.get(key.clone(), None).await?;
@@ -170,7 +170,7 @@ where
         Ok(value)
     }
 
-    async fn delete(&self, key: K) -> Result<(), Box<dyn Error>> {
+    async fn delete(&self, key: K) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Fetch the value before deletion
         let value = match self.get(key.clone(), None).await {
             Ok(v) => v, // Key exists, proceed with deletion
@@ -197,7 +197,7 @@ where
             tokio::sync::oneshot::Sender<()>,
             tokio_stream::wrappers::ReceiverStream<WatchEvent<K, T>>,
         ),
-        Box<dyn Error>,
+        Box<dyn Error + Send + Sync>,
     > {
         // Add watcher to the manager
         match &self.watcher_manager {
