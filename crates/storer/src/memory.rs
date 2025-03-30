@@ -1,4 +1,3 @@
-//use crate::error::{AlreadyExists, NotFoundError};
 use crate::storer::{GetOptions, ListOptions, Storer};
 use crate::watch::WatchEvent;
 use crate::watcher_manager::WatcherManager;
@@ -11,6 +10,10 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use std::pin::Pin;
+use tokio_stream::{Stream, wrappers::ReceiverStream};
+use tokio::sync::mpsc;
+
 
 pub struct Memory<K, T>
 where
@@ -45,7 +48,7 @@ where
         }
     }
 
-    async fn notify_watcher_manager(&self, event: WatchEvent<K, T>) {
+    async fn notify_watcher_manager(&self, event: WatchEvent<T>) {
         if let Some(watcher_manager) = &self.watcher_manager {
             if watcher_manager.is_running().await {
                 if let Err(e) = watcher_manager.event_channel_tx().send(event).await {
@@ -79,19 +82,32 @@ where
 
     async fn list(
         &self,
-        visitor_fn: Box<dyn Fn(K, T) + Send>,
         _opts: Option<ListOptions>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let store = self.store.read().await;
-        for (key, value) in store.iter() {
-            visitor_fn(key.clone(), value.clone());
-        }
-        Ok(())
+    ) ->  Result<
+    (   
+        Pin<Box<dyn Stream<Item = (K, T)> + Send + Sync>>, 
+        u64,                  // resource_version
+        Option<(String, u64)>,       // (continue_token, remaining_items)
+    ), Box<dyn Error + Send + Sync>> {
+        let store = Arc::clone(&self.store); // Clone the Arc to move into task
+
+        let (tx, rx) = mpsc::channel(10);
+
+        tokio::spawn(async move {
+            let store = store.read().await; 
+            for (key, value) in store.iter() {
+                if tx.send((key.clone(), value.clone())).await.is_err() {
+                    break; // Stop if receiver is dropped
+                }
+            }
+        });
+
+        Ok((Box::pin(ReceiverStream::new(rx)), 0, None)) 
     }
 
-    async fn list_keys(&self, _opts: Option<ListOptions>) -> Vec<String> {
+    async fn list_keys(&self, _opts: Option<ListOptions>) -> (Vec<K>, u64) {
         let store = self.store.read().await;
-        store.keys().map(|key| format!("{:?}", key)).collect()
+        (store.keys().cloned().collect(), 0)
     }
 
     async fn len(&self, _opts: Option<ListOptions>) -> usize {
@@ -104,10 +120,10 @@ where
         let mut store = self.store.write().await;
         store.insert(key.clone(), value.clone());
         if !exists {
-            self.notify_watcher_manager(WatchEvent::Added(key.clone(), value.clone()))
+            self.notify_watcher_manager(WatchEvent::Added(value.clone()))
                 .await;
         } else {
-            self.notify_watcher_manager(WatchEvent::Modified(key.clone(), value.clone()))
+            self.notify_watcher_manager(WatchEvent::Modified(value.clone()))
                 .await;
         }
         Ok(value)
@@ -120,7 +136,7 @@ where
                 as Box<dyn Error + Send + Sync>);
         }
         store.insert(key.clone(), value.clone());
-        self.notify_watcher_manager(WatchEvent::Added(key.clone(), value.clone()))
+        self.notify_watcher_manager(WatchEvent::Added(value.clone()))
             .await;
         Ok(value)
     }
@@ -132,7 +148,7 @@ where
                 as Box<dyn Error + Send + Sync>);
         }
         store.insert(key.clone(), value.clone());
-        self.notify_watcher_manager(WatchEvent::Modified(key.clone(), value.clone()))
+        self.notify_watcher_manager(WatchEvent::Modified(value.clone()))
             .await;
         Ok(value)
     }
@@ -142,7 +158,7 @@ where
         let value = store.remove(&key).ok_or_else(|| {
             Box::new(APIError::NotFound(format!("key: {:?}", key))) as Box<dyn Error + Send + Sync>
         })?;
-        self.notify_watcher_manager(WatchEvent::Deleted(key.clone(), value.clone()))
+        self.notify_watcher_manager(WatchEvent::Deleted(value.clone()))
             .await;
         Ok(())
     }
@@ -154,7 +170,7 @@ where
     ) -> Result<
         (
             tokio::sync::oneshot::Sender<()>,
-            tokio_stream::wrappers::ReceiverStream<WatchEvent<K, T>>,
+            tokio_stream::wrappers::ReceiverStream<WatchEvent<T>>,
         ),
         Box<dyn Error + Send + Sync>,
     > {
@@ -282,7 +298,7 @@ mod tests {
             .expect("Failed to create key2");
 
         // List keys
-        let keys = memory.list_keys(None).await;
+        let (keys, _resource_version) = memory.list_keys(None).await;
 
         assert_eq!(keys.len(), 2);
         assert!(keys.contains(&"\"key1\"".to_string()));
@@ -291,6 +307,7 @@ mod tests {
 
     use std::sync::Arc;
     use tokio::sync::Mutex;
+    use tokio_stream::StreamExt;
 
     #[tokio::test]
     async fn test_list_with_visitor() {
@@ -306,9 +323,26 @@ mod tests {
             .await
             .expect("Failed to create key2");
 
+
+        // ✅ Use Arc<Mutex<Vec<T>>> for thread-safe shared mutability
+        let local_results = Arc::new(Mutex::new(Vec::new()));
+
+        // ✅ Call list() to get a stream
+        let  (mut stream, _resource_version, _continue_token) = memory.list(None).await.expect("Failed to list keys");
+
+        // ✅ Collect the stream into a Vec<(K, T)>
+        while let Some((key, value)) = stream.next().await {
+            let local_results_clone = Arc::clone(&local_results);
+            tokio::spawn(async move {
+                let mut results = local_results_clone.lock().await;
+                results.push((key, value));
+            });
+        }
+
+        /* 
         // Use Arc<Mutex<Vec<T>>> for thread-safe shared mutability
         let local_results = Arc::new(Mutex::new(Vec::new()));
-        let results_clone = local_results.clone();
+        let results_clone: Arc<Mutex<Vec<(String, String)>>> = local_results.clone();
 
         memory
             .list(
@@ -324,6 +358,7 @@ mod tests {
             )
             .await
             .expect("Failed to list keys");
+        */
 
         // Allow spawned tasks to complete
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

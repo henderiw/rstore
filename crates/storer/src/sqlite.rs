@@ -11,6 +11,11 @@ use std::cmp::{Eq, Ord};
 use std::error::Error;
 use std::fmt::Debug;
 use std::sync::Arc;
+use std::pin::Pin;
+use tokio_stream::{Stream, wrappers::ReceiverStream};
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+use sqlx::Row;
 
 pub struct SqliteStorer<K, T>
 where
@@ -18,7 +23,6 @@ where
     T: Serialize + DeserializeOwned + Clone + Debug + Send + Sync + 'static,
 {
     pool: SqlitePool,
-    //_phantom: std::marker::PhantomData<(K, T)>,
     watcher_manager: Option<Arc<WatcherManager<K, T>>>,
 }
 
@@ -57,7 +61,7 @@ where
         }))
     }
 
-    async fn notify_watcher_manager(&self, event: WatchEvent<K, T>) {
+    async fn notify_watcher_manager(&self, event: WatchEvent<T>) {
         if let Some(watcher_manager) = &self.watcher_manager {
             if watcher_manager.is_running().await {
                 if let Err(e) = watcher_manager.event_channel_tx().send(event).await {
@@ -91,6 +95,7 @@ where
         Ok(deserialized_value)
     }
 
+    /* 
     async fn list(
         &self,
         visitor_fn: Box<dyn Fn(K, T) + Send>,
@@ -108,14 +113,48 @@ where
 
         Ok(())
     }
+    */
 
-    async fn list_keys(&self, _opts: Option<ListOptions>) -> Vec<String> {
+    async fn list(
+        &self,
+        _opts: Option<ListOptions>,
+    ) -> Result<
+        (   
+            Pin<Box<dyn Stream<Item = (K, T)> + Send + Sync>>, 
+            u64,                  // resource_version
+            Option<(String, u64)>,       // (continue_token, remaining_items)
+        ), Box<dyn Error + Send + Sync>> {
+        let mut rows = sqlx::query("SELECT key, value FROM store")
+            .fetch(&self.pool);
+    
+        // ✅ Create an async channel for streaming
+        let (tx, rx) = mpsc::channel(10);
+    
+        // ✅ Spawn a task to stream results lazily
+        tokio::spawn(async move {
+            while let Some(row) = rows.try_next().await.unwrap_or(None) {
+                let key: String = row.try_get("key").unwrap();
+                let value: String = row.try_get("value").unwrap();
+                
+                if let Ok(deserialized_value) = serde_json::from_str::<T>(&value) {
+                    if tx.send((K::from(key), deserialized_value)).await.is_err() {
+                        break; // Receiver dropped
+                    }
+                }
+            }
+        });
+    
+        // ✅ Return a pinned `Stream` wrapping the receiver
+        Ok((Box::pin(ReceiverStream::new(rx)), 0, None))
+    }
+
+    async fn list_keys(&self, _opts: Option<ListOptions>) -> (Vec<K>, u64) {
         let rows = sqlx::query_as::<_, (String,)>("SELECT key FROM store")
             .fetch_all(&self.pool)
             .await
-            .unwrap_or_default();
-
-        rows.into_iter().map(|(key,)| key).collect()
+            .unwrap_or_else(|_| vec![]);  // Return an empty list in case of failure
+    
+        (rows.into_iter().map(|(key,)| K::from(key)).collect(), 0)
     }
 
     async fn len(&self, _opts: Option<ListOptions>) -> usize {
@@ -141,10 +180,10 @@ where
         .map_err(|e| APIError::from(DBError(e)))?;
 
         if result.rows_affected() == 1 {
-            self.notify_watcher_manager(WatchEvent::Added(key.clone(), value.clone()))
+            self.notify_watcher_manager(WatchEvent::Added(value.clone()))
                 .await;
         } else {
-            self.notify_watcher_manager(WatchEvent::Modified(key.clone(), value.clone()))
+            self.notify_watcher_manager(WatchEvent::Modified(value.clone()))
                 .await;
         }
 
@@ -161,7 +200,7 @@ where
             .await
             .map_err(|e| APIError::from(DBError(e)))?;
 
-        self.notify_watcher_manager(WatchEvent::Added(key.clone(), value.clone()))
+        self.notify_watcher_manager(WatchEvent::Added(value.clone()))
             .await;
         Ok(value)
     }
@@ -178,7 +217,7 @@ where
             .await
             .map_err(|e| APIError::from(DBError(e)))?;
 
-        self.notify_watcher_manager(WatchEvent::Modified(key.clone(), value.clone()))
+        self.notify_watcher_manager(WatchEvent::Modified(value.clone()))
             .await;
         Ok(value)
     }
@@ -197,7 +236,7 @@ where
             .map_err(|e| APIError::from(DBError(e)))?;
 
         // Step 3: Notify the watcher manager
-        self.notify_watcher_manager(WatchEvent::Deleted(key.clone(), value))
+        self.notify_watcher_manager(WatchEvent::Deleted(value))
             .await;
         Ok(())
     }
@@ -209,7 +248,7 @@ where
     ) -> Result<
         (
             tokio::sync::oneshot::Sender<()>,
-            tokio_stream::wrappers::ReceiverStream<WatchEvent<K, T>>,
+            tokio_stream::wrappers::ReceiverStream<WatchEvent<T>>,
         ),
         Box<dyn Error + Send + Sync>,
     > {
@@ -345,7 +384,7 @@ mod tests {
             .await
             .expect("Failed to create key2");
 
-        let keys = store.list_keys(None).await;
+        let (keys, _resource_version) = store.list_keys(None).await;
         assert_eq!(keys.len(), 2);
         assert!(keys.contains(&"key1".to_string()));
         assert!(keys.contains(&"key2".to_string()));
@@ -364,6 +403,22 @@ mod tests {
             .await
             .expect("Failed to create key2");
 
+        // ✅ Use Arc<Mutex<Vec<T>>> for thread-safe shared mutability
+        let local_results = Arc::new(Mutex::new(Vec::new()));
+
+        // ✅ Call list() to get a stream
+        let (mut stream, _resource_version, _continue_token) = store.list(None).await.expect("Failed to list keys");
+
+        // ✅ Collect the stream into a Vec<(K, T)>
+        while let Some((key, value)) = stream.next().await {
+            let local_results_clone = Arc::clone(&local_results);
+            tokio::spawn(async move {
+                let mut results = local_results_clone.lock().await;
+                results.push((key, value));
+            });
+        }
+
+        /* 
         let results = Arc::new(Mutex::new(Vec::new()));
         let results_clone = results.clone();
 
@@ -381,12 +436,13 @@ mod tests {
             )
             .await
             .expect("Failed to list");
+        */
 
         // Allow spawned tasks to complete
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         // Lock mutex before asserting
-        let results = results.lock().await;
+        let results = local_results.lock().await;
         assert_eq!(results.len(), 2);
         assert!(results.iter().any(|(_, v)| v == "value1"));
         assert!(results.iter().any(|(_, v)| v == "value2"));
@@ -447,6 +503,9 @@ mod tests {
         let watch_options = Some(ListOptions {
             commit: None,
             watch_only: false,
+            limit: None,
+            continue_token: None,
+
         });
         let (_stop_tx, mut watch_stream) = store
             .watch(oneshot::channel().1, watch_options)
@@ -467,8 +526,7 @@ mod tests {
         // Step 4: Wait for the event with a timeout
         match tokio::time::timeout(tokio::time::Duration::from_secs(1), watch_stream.next()).await {
             Ok(Some(event)) => match event {
-                WatchEvent::Added(k, v) => {
-                    assert_eq!(k, key);
+                WatchEvent::Added(v) => {
                     assert_eq!(v, value);
                 }
                 _ => panic!("Unexpected watch event"),

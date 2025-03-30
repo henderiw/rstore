@@ -7,7 +7,9 @@ use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::oneshot;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{Stream, wrappers::ReceiverStream};
+use std::pin::Pin;
+use base64::{engine::general_purpose, Engine as _};
 
 #[derive(Debug, Clone)]
 pub struct GetOptions {
@@ -18,6 +20,8 @@ pub struct GetOptions {
 pub struct ListOptions {
     pub commit: Option<String>,
     pub watch_only: bool,
+    pub limit: Option<u32>,
+    pub continue_token: Option<String>,
 }
 
 //pub type StorerValue<T> = Arc<T>;
@@ -35,10 +39,16 @@ where
     ) -> Result<T, Box<dyn Error + Send + Sync>>;
     async fn list(
         &self,
-        visitor_fn: Box<dyn Fn(K, T) + Send>,
         opts: Option<ListOptions>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>>;
-    async fn list_keys(&self, opts: Option<ListOptions>) -> Vec<String>;
+    ) -> Result<
+        (
+            Pin<Box<dyn Stream<Item = (K, T)> + Send + Sync>>,
+            u64,                  // resource_version
+            Option<(String, u64)>,       // (continue_token, remaining_items)
+        ),
+        Box<dyn Error + Send + Sync>
+    >;
+    async fn list_keys(&self, opts: Option<ListOptions>) -> (Vec<K>, u64);
     async fn len(&self, opts: Option<ListOptions>) -> usize;
     async fn apply(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>>;
     async fn create(&self, key: K, value: T) -> Result<T, Box<dyn Error + Send + Sync>>;
@@ -48,7 +58,7 @@ where
         &self,
         ctx: oneshot::Receiver<()>,
         opts: Option<ListOptions>,
-    ) -> Result<(oneshot::Sender<()>, ReceiverStream<WatchEvent<K, T>>), Box<dyn Error + Send + Sync>>;
+    ) -> Result<(oneshot::Sender<()>, ReceiverStream<WatchEvent<T>>), Box<dyn Error + Send + Sync>>;
 }
 
 #[async_trait::async_trait]
@@ -68,13 +78,19 @@ where
 
     async fn list(
         &self,
-        visitor_fn: Box<dyn Fn(K, T) + Send>,
         opts: Option<ListOptions>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.deref().list(visitor_fn, opts).await
+    ) -> Result<
+        (
+            Pin<Box<dyn Stream<Item = (K, T)> + Send + Sync>>,
+            u64,                    // resource_version
+            Option<(String, u64)>,  // (continue_token, remaining_items)
+        ),
+        Box<dyn Error + Send + Sync>
+    > {
+        self.deref().list(opts).await
     }
 
-    async fn list_keys(&self, opts: Option<ListOptions>) -> Vec<String> {
+    async fn list_keys(&self, opts: Option<ListOptions>) -> (Vec<K>, u64) {
         self.deref().list_keys(opts).await
     }
 
@@ -102,8 +118,30 @@ where
         &self,
         ctx: oneshot::Receiver<()>,
         opts: Option<ListOptions>,
-    ) -> Result<(oneshot::Sender<()>, ReceiverStream<WatchEvent<K, T>>), Box<dyn Error + Send + Sync>>
+    ) -> Result<(oneshot::Sender<()>, ReceiverStream<WatchEvent<T>>), Box<dyn Error + Send + Sync>>
     {
         self.deref().watch(ctx, opts).await
     }
+}
+
+
+pub fn decode_continue_token(token: &str) -> Option<(u64, String)> {
+    let decoded = general_purpose::STANDARD.decode(token).ok()?;
+    let decoded_str = String::from_utf8(decoded).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&decoded_str).ok()?;
+    
+    let rv = parsed["rv"].as_u64()?;
+    let start = parsed["start"].as_str()?.to_string();
+    
+    Some((rv, start))
+}
+
+pub fn encode_continue_token(rv: u64, start: &str) -> String {
+    let data = serde_json::json!({
+        "rv": rv,
+        "start": start
+    });
+
+    let json_string = serde_json::to_string(&data).unwrap_or_default();
+    general_purpose::STANDARD.encode(json_string)
 }

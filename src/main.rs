@@ -113,14 +113,14 @@ async fn main() {
     let event_task = tokio::spawn(async move {
         while let Some(event) = event_stream.next().await {
             match event {
-                WatchEvent::Added(key, value) => {
-                    println!("Event: Added => key {} value {}", key, value)
+                WatchEvent::Added(value) => {
+                    println!("Event: Added => value {}", value)
                 }
-                WatchEvent::Modified(key, value) => {
-                    println!("Event: Modified => key {} value {}", key, value)
+                WatchEvent::Modified(value) => {
+                    println!("Event: Modified => value {}", value)
                 }
-                WatchEvent::Deleted(key, value) => {
-                    println!("Event: Deleted => key {} value {}", key, value)
+                WatchEvent::Deleted(value) => {
+                    println!("Event: Deleted => value {}", value)
                 }
                 WatchEvent::Error => eprintln!("Event: Error occurred"),
             }
@@ -155,10 +155,23 @@ async fn main() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     println!("Watcher stopped. Exiting application.");
 
+    let (mut stream, _resource_version, _continue_token) = memory.list(None).await.expect("Failed to list keys");
+    while let Some((key, value)) = stream.next().await {
+        println!("Data key {} value {}", key, value);
+
+        //let local_results_clone = Arc::clone(&local_results);
+        //tokio::spawn(async move {
+        //    let mut results = local_results_clone.lock().await;
+        //    results.push((key, value));
+        //});
+    }
+
+    /* 
     let list_fn = Box::new(|key: String, value: String| {
         println!("Data key {} value {}", key, value);
     });
     memory.list(list_fn, None).await.unwrap();
+    */
     // Ensure event processing task completes
     event_task.await.expect("Event task failed");
 }

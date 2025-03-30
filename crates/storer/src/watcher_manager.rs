@@ -13,11 +13,11 @@ use tracing;
 
 pub struct WatcherManager<K, T> {
     store: Arc<dyn Storer<K, T>>,
-    broadcast_channel: broadcast::Sender<WatchEvent<K, T>>,
-    event_channel: Arc<Mutex<mpsc::Receiver<WatchEvent<K, T>>>>,
+    broadcast_channel: broadcast::Sender<WatchEvent<T>>,
+    event_channel: Arc<Mutex<mpsc::Receiver<WatchEvent<T>>>>,
     max_watchers: usize,
     running: Arc<Mutex<bool>>,
-    event_channel_tx: mpsc::Sender<WatchEvent<K, T>>,
+    event_channel_tx: mpsc::Sender<WatchEvent<T>>,
 }
 
 impl<K, T> WatcherManager<K, T>
@@ -38,7 +38,7 @@ where
         }
     }
 
-    pub fn event_channel_tx(&self) -> &mpsc::Sender<WatchEvent<K, T>> {
+    pub fn event_channel_tx(&self) -> &mpsc::Sender<WatchEvent<T>> {
         &self.event_channel_tx
     }
 
@@ -50,7 +50,7 @@ where
     pub async fn add_watcher(
         self: Arc<Self>,
         opts: Option<ListOptions>,
-    ) -> Result<(oneshot::Sender<()>, ReceiverStream<WatchEvent<K, T>>), Box<dyn Error + Send + Sync>>
+    ) -> Result<(oneshot::Sender<()>, ReceiverStream<WatchEvent<T>>), Box<dyn Error + Send + Sync>>
     {
         if self.broadcast_channel.receiver_count() >= self.max_watchers {
             return Err("Max watchers reached".to_string().into());
@@ -99,8 +99,8 @@ where
 
     async fn start_catchup_phase(
         &self,
-        watch_tx: tokio::sync::mpsc::Sender<WatchEvent<K, T>>,
-        backlog: Arc<Mutex<Vec<WatchEvent<K, T>>>>,
+        watch_tx: tokio::sync::mpsc::Sender<WatchEvent<T>>,
+        backlog: Arc<Mutex<Vec<WatchEvent<T>>>>,
         catchup_done: Arc<Mutex<bool>>,
     ) {
         let store = self.store.clone();
@@ -108,6 +108,29 @@ where
         //let backlog_clone = backlog.clone();
         //let catchup_done_clone = catchup_done.clone();
         tokio::spawn(async move {
+
+            // Step 1: Get an async stream from `list`
+            let (list_stream , _resource_version)= match store.list(None).await {
+                Ok((stream, resource_version, _continue_token)) => (stream, resource_version),
+                Err(e) => {
+                    tracing::error!("Error listing resources: {:?}", e);
+                    return; // Stop if listing fails
+                }
+            };
+
+            // Step 2: Pin the stream
+            let mut list_stream = Box::pin(list_stream);
+
+            // Step 3: Iterate over the stream and send watch events
+            while let Some((_key, value)) = list_stream.next().await {
+                let event = WatchEvent::Added(value.clone());
+                if watch_tx_clone.try_send(event).is_err() {
+                    tracing::warn!("Watcher dropped event due to full queue.");
+                }
+            }
+
+
+            /* 
             let visitor_fn: Box<dyn Fn(K, T) + Send> = Box::new(move |key, value| {
                 let event = WatchEvent::Added(key.clone(), value.clone()); // Clone Arc<T> instead of Arc<Arc<T>>
                 if watch_tx_clone.try_send(event).is_err() {
@@ -120,6 +143,7 @@ where
                 tracing::error!("Error listing resources: {:?}", e);
                 return; // Stop if listing fails
             }
+            */
 
             // Step 2: Send backlog events
             let mut backlog_lock = backlog.lock().await;
@@ -138,9 +162,9 @@ where
     fn spawn_watcher_task(
         &self,
         mut stop_rx: oneshot::Receiver<()>,
-        mut broadcast_stream: BroadcastStream<WatchEvent<K, T>>,
-        watch_tx: tokio::sync::mpsc::Sender<WatchEvent<K, T>>,
-        backlog: Arc<Mutex<Vec<WatchEvent<K, T>>>>,
+        mut broadcast_stream: BroadcastStream<WatchEvent<T>>,
+        watch_tx: tokio::sync::mpsc::Sender<WatchEvent<T>>,
+        backlog: Arc<Mutex<Vec<WatchEvent<T>>>>,
         catchup_done: Arc<Mutex<bool>>,
         watch_only: bool,
     ) {

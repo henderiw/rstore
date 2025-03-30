@@ -2,20 +2,20 @@
 //use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Clone)]
-pub enum WatchEvent<K, T> {
-    Added(K, T),
-    Modified(K, T),
-    Deleted(K, T),
+pub enum WatchEvent<T> {
+    Added(T),
+    Modified(T),
+    Deleted(T),
     Error,
 }
 
-impl<K, T> WatchEvent<K, T> {
+impl<T> WatchEvent<T> {
     /// Provides a reference to the inner object, if present.
-    pub fn as_ref(&self) -> Option<(&K, &T)> {
+    pub fn as_ref(&self) -> Option<&T> {
         match self {
-            WatchEvent::Added(key, value) => Some((key, value)),
-            WatchEvent::Modified(key, value) => Some((key, value)),
-            WatchEvent::Deleted(key, value) => Some((key, value)),
+            WatchEvent::Added(value) => Some(value),
+            WatchEvent::Modified(value) => Some(value),
+            WatchEvent::Deleted(value) => Some(value),
             WatchEvent::Error => None,
         }
     }

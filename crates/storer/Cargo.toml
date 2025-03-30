@@ -19,3 +19,5 @@ rayon = "1.10.0"
 sqlx = { version = "0.8.3", features = ["sqlite", "time", "runtime-tokio"] }
 tracing = "0.1.41"
 core_apim = { path = "/Users/henderiw/code/kform/kform-dev/choreo-rust/crates/apimachinery/core"}
+async-stream = "0.3"
+base64 = "0.22"
